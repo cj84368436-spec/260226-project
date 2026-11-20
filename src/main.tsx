@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { getSafeAreaInsets } from "@apps-in-toss/web-framework";
 import {
   Wallet,
   CalendarDays,
@@ -16,7 +17,7 @@ import {
   Coins,
 } from "lucide-react";
 import { fortune, resolve, today, hours, type Profile } from "./fortune";
-import { loadFullScreenAd, showFullScreenAd } from "./ads";
+import { loadFullScreenAd, showFullScreenAd, supportsNativeAds } from "./ads";
 import "./style.css";
 import { store, seedKey } from "./storage";
 function saved(raw: string | null): Profile | null {
@@ -75,6 +76,8 @@ function App({
     [unlock, setUnlock] = useState(initialUnlock),
     [status, A] = useState("loading"),
     [note, N] = useState("");
+  const [preloadAttempt, reloadAd] = React.useReducer((n: number) => n + 1, 0);
+  const nativeAds = supportsNativeAds();
   const cancel = useRef<() => void>(),
     fields = useRef<(HTMLInputElement | null)[]>([]);
   const profile = { date: parts.join("-"), lunar, leap: lunar && leap, hour };
@@ -93,14 +96,12 @@ function App({
     stamp = "unlocked:" + date,
     opened = unlock === JSON.stringify(p);
   useEffect(() => {
-    import("@apps-in-toss/web-framework")
-      .then((s) => {
-        try {
-          for (const [edge, n] of Object.entries(s.getSafeAreaInsets()))
-            document.documentElement.style.setProperty("--" + edge, n + "px");
-        } catch {}
-      })
-      .catch(() => {});
+    try {
+      for (const [edge, n] of Object.entries(getSafeAreaInsets()))
+        document.documentElement.style.setProperty("--" + edge, n + "px");
+    } catch {
+      /* Browser previews use CSS safe-area-inset values. */
+    }
     const timer = setInterval(() => {
       if (today() !== initialDate) location.reload();
     }, 15000);
@@ -110,16 +111,15 @@ function App({
     if (screen === 0 || unlock) return;
     A("loading");
     return loadFullScreenAd({
-      options: { adGroupId: "mock" },
       onEvent: () => A("ready"),
       onError: () => A("fallback"),
     });
-  }, [screen === 1 || screen === 2, opened, date]);
+  }, [screen === 1 || screen === 2, opened, date, preloadAttempt]);
   useEffect(() => {
     const back = () => {
       if (cancel.current) {
         history.pushState({}, "", "#bonus");
-        cancel.current();
+        if (!nativeAds) cancel.current();
         return;
       }
       const next = p ? 1 : 0;
@@ -138,10 +138,11 @@ function App({
   }
   async function done(msg: string) {
     cancel.current = undefined;
+    A("saving");
     try {
       await store.write(stamp, JSON.stringify(p));
     } catch {
-      A("ready");
+      A("fallback");
       N("보너스 저장에 실패했어. 다시 시도해줘.");
       return;
     }
@@ -158,11 +159,11 @@ function App({
     }
     A("playing");
     cancel.current = showFullScreenAd({
-      options: { adGroupId: "mock" },
       onEvent: (e) => {
         if (e.type === "dismissed") {
           cancel.current = undefined;
-          A("ready");
+          A("loading");
+          reloadAd();
           N("시청을 중단했어. 다시 시청할 수 있어.");
         } else
           done(
@@ -390,9 +391,11 @@ function App({
                     </button>
                   </>
                 )}
-                <div className="adslot">
-                  <small>Ad</small> 브라우저 테스트용 배너 광고
-                </div>
+                {!nativeAds && (
+                  <div className="adslot">
+                    <small>Ad</small> 브라우저 테스트용 배너 광고
+                  </div>
+                )}
                 <div className="sub">{result.basis}</div>
               </>
             ) : (
@@ -411,19 +414,26 @@ function App({
                   </h3>
                 ))}
                 <p>
-                  모의 광고 3초를 끝까지 보면 전부 열려.
+                  {status === "fallback"
+                    ? "오늘의 보너스 3개를 무료로 열 수 있어."
+                    : nativeAds
+                      ? "광고를 끝까지 보면 보너스 3개가 열려."
+                      : "모의 광고 3초를 끝까지 보면 전부 열려."}
                   <br />
                   추가 광고와 결제는 없어.
                 </p>
                 <button
                   className="cta"
-                  disabled={["loading", "playing"].includes(status)}
+                  disabled={["loading", "playing", "saving"].includes(status)}
                   onClick={play}
                 >
                   {
                     {
                       loading: "광고 준비 중…",
-                      playing: "모의 광고 재생 중…",
+                      playing: nativeAds
+                        ? "광고 재생 중…"
+                        : "모의 광고 재생 중…",
+                      saving: "보너스 저장 중…",
                       fallback: "무료로 열기",
                       ready: "광고 보고 열기",
                     }[status]
@@ -431,6 +441,9 @@ function App({
                 </button>
                 <button
                   className="back"
+                  disabled={
+                    status === "saving" || (nativeAds && status === "playing")
+                  }
                   onClick={() => {
                     if (cancel.current) cancel.current();
                     else history.back();
