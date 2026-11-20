@@ -61,3 +61,7 @@ test("시간을 포함한 보너스 시드와 직전 7일 코멘트 중복 방�
     assert.ok(result.percentile >= 1 && result.percentile <= 100);
   }
 });
+test("2017년 음력 2월 30일은 양력 3월 27일", () => {
+  const date = resolve({ ...profile, date: "2017-02-30", lunar: true });
+  assert.equal(date.toISOString().slice(0, 10), "2017-03-27");
+});
