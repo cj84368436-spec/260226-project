@@ -18,21 +18,16 @@ import {
 import { fortune, resolve, today, hours, type Profile } from "./fortune";
 import { loadFullScreenAd, showFullScreenAd } from "./ads";
 import "./style.css";
-function saved(): Profile | null {
+import { store, seedKey } from "./storage";
+function saved(raw: string | null): Profile | null {
   try {
-    let p = JSON.parse(localStorage.wallet_profile);
+    let p = JSON.parse(raw ?? "null");
     resolve(p);
     return p;
   } catch {
     return null;
   }
 }
-const init = saved(),
-  browserKey =
-    localStorage.wallet_key ||
-    (localStorage.wallet_key = Array.from(
-      crypto.getRandomValues(new Uint32Array(4)),
-    ).join("-"));
 const labels = ["생년월일 입력", "오늘의 결과", "보너스 열기"];
 function Art() {
   return (
@@ -59,16 +54,25 @@ function Art() {
     </div>
   );
 }
-function App() {
-  const [key, setKey] = useState(browserKey);
+function App({
+  init,
+  seed,
+  initialDate,
+  initialUnlock,
+}: {
+  init: Profile | null;
+  seed: string;
+  initialDate: string;
+  initialUnlock: string | null;
+}) {
   const [p, setP] = useState(init),
     [screen, S] = useState(init ? 1 : 0),
     [parts, setParts] = useState((init?.date || "--").split("-")),
     [lunar, L] = useState(init?.lunar || false),
     [leap, E] = useState(init?.leap || false),
     [hour, H] = useState(init?.hour ?? -1),
-    [date, D] = useState(today()),
-    [version, V] = useState(0),
+    [date] = useState(initialDate),
+    [unlock, setUnlock] = useState(initialUnlock),
     [status, A] = useState("loading"),
     [note, N] = useState("");
   const cancel = useRef<() => void>(),
@@ -83,31 +87,27 @@ function App() {
       error = (e as Error).message;
     }
   const result = React.useMemo(
-      () => (p ? fortune(p, date, key) : null),
-      [p, date, key],
+      () => (p ? fortune(p, date, seed) : null),
+      [p, date, seed],
     ),
     stamp = "unlocked:" + date,
-    opened = localStorage.getItem(stamp) === JSON.stringify(p);
+    opened = unlock === JSON.stringify(p);
   useEffect(() => {
     import("@apps-in-toss/web-framework")
       .then((s) => {
-        if (s.User.getAnonymousKey.isSupported())
-          s.User.getAnonymousKey()
-            .then((v) => {
-              if (v?.type === "HASH") setKey(v.hash);
-            })
-            .catch(() => {});
         try {
           for (const [edge, n] of Object.entries(s.getSafeAreaInsets()))
             document.documentElement.style.setProperty("--" + edge, n + "px");
         } catch {}
       })
       .catch(() => {});
-    const timer = setInterval(() => D(today()), 15000);
+    const timer = setInterval(() => {
+      if (today() !== initialDate) location.reload();
+    }, 15000);
     return () => clearInterval(timer);
   }, []);
   useEffect(() => {
-    if (screen !== 1 || opened) return;
+    if (screen === 0 || unlock) return;
     A("loading");
     return loadFullScreenAd({
       options: { adGroupId: "mock" },
@@ -117,24 +117,35 @@ function App() {
   }, [screen === 1 || screen === 2, opened, date]);
   useEffect(() => {
     const back = () => {
-      cancel.current?.();
-      cancel.current = undefined;
-      S(saved() ? 1 : 0);
+      if (cancel.current) {
+        history.pushState({}, "", "#bonus");
+        cancel.current();
+        return;
+      }
+      const next = p ? 1 : 0;
+      history.replaceState({}, "", next ? "#result" : "#input");
+      S(next);
       N("");
     };
     window.addEventListener("popstate", back);
     return () => window.removeEventListener("popstate", back);
-  }, []);
+  }, [p]);
   function go(n: number) {
     history.pushState({}, "", "#" + ["input", "result", "bonus"][n]);
     S(n);
     N("");
     scrollTo(0, 0);
   }
-  function done(msg: string) {
+  async function done(msg: string) {
     cancel.current = undefined;
-    localStorage.setItem(stamp, JSON.stringify(p));
-    V(version + 1);
+    try {
+      await store.write(stamp, JSON.stringify(p));
+    } catch {
+      A("ready");
+      N("보너스 저장에 실패했어. 다시 시도해줘.");
+      return;
+    }
+    setUnlock(JSON.stringify(p));
     history.replaceState({}, "", "#result");
     S(1);
     scrollTo(0, 0);
@@ -150,6 +161,7 @@ function App() {
       options: { adGroupId: "mock" },
       onEvent: (e) => {
         if (e.type === "dismissed") {
+          cancel.current = undefined;
           A("ready");
           N("시청을 중단했어. 다시 시청할 수 있어.");
         } else
@@ -207,7 +219,7 @@ function App() {
           <section>
             {screen === 0 ? (
               <form
-                onSubmit={(e) => {
+                onSubmit={async (e) => {
                   e.preventDefault();
                   if (!complete || error) return;
                   const v = {
@@ -216,7 +228,12 @@ function App() {
                       .map((n, i) => (i ? n.padStart(2, "0") : n))
                       .join("-"),
                   };
-                  localStorage.wallet_profile = JSON.stringify(v);
+                  try {
+                    await store.write("wallet_profile", JSON.stringify(v));
+                  } catch {
+                    N("프로필 저장에 실패했어. 다시 시도해줘.");
+                    return;
+                  }
                   setP(v);
                   history.replaceState({}, "", "#result");
                   S(1);
@@ -320,13 +337,19 @@ function App() {
                   <small> / 100</small>
                 </strong>
                 <h3>{result.grade}</h3>
+                <small>
+                  내 60일 주기 기준 하위 {result.percentile}% · 동점 포함
+                </small>
                 <p>{result.comment}</p>
                 <div className="metrics">
                   <div>
                     소비 방어력<b>{result.defense}%</b>
                   </div>
                   <div>
-                    재물 기운<b>{"★".repeat(result.stars)}</b>
+                    재물 기운
+                    <b>
+                      {"★".repeat(result.stars) + "☆".repeat(5 - result.stars)}
+                    </b>
                   </div>
                 </div>
                 <label>충동구매 위험 시간대</label>
@@ -351,7 +374,7 @@ function App() {
                       {result.luckItem}
                     </small>
                   </>
-                ) : localStorage.getItem(stamp) ? (
+                ) : unlock ? (
                   <p>오늘의 보너스는 처음 열었던 생일로 확인해.</p>
                 ) : (
                   <>
@@ -367,7 +390,9 @@ function App() {
                     </button>
                   </>
                 )}
-                <div className="adslot"><small>Ad</small> 브라우저 테스트용 배너 광고</div>
+                <div className="adslot">
+                  <small>Ad</small> 브라우저 테스트용 배너 광고
+                </div>
                 <div className="sub">{result.basis}</div>
               </>
             ) : (
@@ -407,12 +432,12 @@ function App() {
                 <button
                   className="back"
                   onClick={() => {
-                    cancel.current?.();
-                    cancel.current = undefined;
-                    history.back();
+                    if (cancel.current) cancel.current();
+                    else history.back();
                   }}
                 >
-                  <ArrowLeft size={15} /> 나중에 할래
+                  <ArrowLeft size={15} />{" "}
+                  {status === "playing" ? "광고 닫기" : "나중에 할래"}
                 </button>
               </>
             )}
@@ -443,4 +468,24 @@ function App() {
     </>
   );
 }
-createRoot(document.getElementById("root")!).render(<App />);
+const root = createRoot(document.getElementById("root")!);
+async function start() {
+  const date = today();
+  const [raw, seed, unlock] = await Promise.all([
+    store.read("wallet_profile"),
+    seedKey(),
+    store.read("unlocked:" + date),
+  ]);
+  const init = saved(raw);
+  history.replaceState({}, "", init ? "#result" : "#input");
+  root.render(
+    <App init={init} seed={seed} initialDate={date} initialUnlock={unlock} />,
+  );
+}
+start().catch(() =>
+  root.render(
+    <button onClick={() => location.reload()}>
+      저장 정보를 읽지 못했어. 다시 시도
+    </button>,
+  ),
+);

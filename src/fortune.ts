@@ -1,4 +1,5 @@
 import { Solar } from "lunar-typescript";
+import years from "./lunar-years.json" with { type: "json" };
 export type Profile = {
   date: string;
   lunar: boolean;
@@ -50,33 +51,32 @@ export const hours = Array.from(
 );
 export function resolve(p: Profile) {
   const [y, m, d] = p.date.split("-").map(Number);
-  if (y < 1900 || !Number.isInteger(d) || m < 1 || m > 12 || d < 1 || d > 31)
+  if (
+    !Number.isInteger(y) ||
+    !Number.isInteger(m) ||
+    !Number.isInteger(p.hour) ||
+    p.hour < -1 ||
+    p.hour > 11 ||
+    y < 1900 ||
+    !Number.isInteger(d) ||
+    m < 1 ||
+    m > 12 ||
+    d < 1 ||
+    d > 31
+  )
     throw Error("생년월일을 확인해줘.");
   let dt = new Date(Date.UTC(y, m - 1, d, 12));
   if (p.lunar) {
-    const fmt = new Intl.DateTimeFormat("en-u-ca-dangi", {
-      year: "numeric",
-      month: "numeric",
-      day: "numeric",
-      timeZone: "Asia/Seoul",
-    });
-    let found = false;
-    for (let i = 0; i < 100; i++) {
-      const parts = Object.fromEntries(
-        fmt.formatToParts(dt).map((v) => [v.type, v.value]),
-      );
-      if (
-        +parts.relatedYear === y &&
-        parseInt(parts.month) === m &&
-        +parts.day === d &&
-        parts.month.includes("bis") === p.leap
-      ) {
-        found = true;
-        break;
-      }
-      dt = new Date(+dt + 86400000);
-    }
-    if (!found) throw Error("음력 날짜와 윤달 여부를 확인해줘.");
+    if (y > 2100) throw Error("음력은 1900~2100년만 지원해.");
+    const [start, bits, leap] = years[y - 1900] as [string, string, number];
+    if (p.leap && leap !== m) throw Error("음력 날짜와 윤달 여부를 확인해줘.");
+    const index = m - 1 + Number(p.leap || (leap > 0 && leap < m));
+    if (d > 29 + Number(bits[index])) throw Error("음력 날짜를 확인해줘.");
+    const offset = Array.from(bits.slice(0, index)).reduce(
+      (sum, bit) => sum + 29 + Number(bit),
+      d - 1,
+    );
+    dt = new Date(Date.parse(start + "T12:00:00Z") + offset * 86400000);
   } else if (dt.getUTCMonth() !== m - 1) throw Error("존재하지 않는 날짜야.");
   if (dt.toISOString().slice(0, 10) > today())
     throw Error("미래 날짜는 입력할 수 없어.");
@@ -113,16 +113,6 @@ export function fortune(p: Profile, date: string, key: string) {
     x = branches.indexOf(day[1]),
     z = branches.indexOf(now[1]),
     r = relation(a, b);
-  const clash = (z + 6) % 12,
-    harm = (19 - z) % 12,
-    match = (13 - z) % 12;
-  const punishment =
-    ["子卯", "寅巳申", "丑戌未"].some(
-      (group) => x !== z && group.includes(day[1]) && group.includes(now[1]),
-    ) ||
-    (x === z && "辰午酉亥".includes(day[1]));
-  const modifier =
-    x === clash ? -10 : punishment ? -6 : x === harm ? -5 : x === match ? 5 : 0;
   const pillars = [
     natal.getYearInGanZhiExact(),
     natal.getMonthInGanZhiExact(),
@@ -134,23 +124,54 @@ export function fortune(p: Profile, date: string, key: string) {
   const elements = pillars
     .flatMap((s) => [s[0], ...hidden[branches.indexOf(s[1])]])
     .map((s) => Math.floor(stems.indexOf(s) / 2));
+  function scoreFor(b: number, z: number) {
+    const r = relation(a, b);
+    const clash = (z + 6) % 12,
+      harm = (19 - z) % 12,
+      match = (13 - z) % 12;
+    const punishment =
+      ["子卯", "寅巳申", "丑戌未"].some(
+        (group) =>
+          x !== z && group.includes(branches[x]) && group.includes(branches[z]),
+      ) ||
+      (x === z && "辰午酉亥".includes(branches[x]));
+    const modifier =
+      x === clash
+        ? -10
+        : punishment
+          ? -6
+          : x === harm
+            ? -5
+            : x === match
+              ? 5
+              : 0;
+    const roots = Array.from(hidden[z], (s) => relation(a, stems.indexOf(s)));
+    return clamp(
+      Math.round(
+        50 +
+          weights[r] +
+          [-3, -4, 2, -8, 6][r >> 1] +
+          modifier +
+          clamp(
+            (roots.reduce((v, s) => v + weights[s], 0) / roots.length) * 0.6,
+            -8,
+            8,
+          ) +
+          (r >> 1 === 2 && !elements.includes(b >> 1) ? 5 : 0),
+      ),
+      0,
+      100,
+    );
+  }
+  const score = scoreFor(b, z);
+  const rank = Array.from({ length: 60 }, (_, i) =>
+    scoreFor(i % 10, i % 12),
+  ).filter((v) => v <= score).length;
+  const percentile = Math.round((rank * 100) / 60);
   const roots = Array.from(hidden[z], (s) => relation(a, stems.indexOf(s)));
-  const score = clamp(
-    Math.round(
-      50 +
-        weights[r] +
-        [-3, -4, 2, -8, 6][r >> 1] +
-        modifier +
-        clamp(
-          (roots.reduce((v, s) => v + weights[s], 0) / roots.length) * 0.6,
-          -8,
-          8,
-        ) +
-        (r >> 1 === 2 && !elements.includes(b >> 1) ? 5 : 0),
-    ),
-    0,
-    100,
-  );
+  const clash = (z + 6) % 12,
+    harm = (19 - z) % 12,
+    match = (13 - z) % 12;
   const defense = clamp(
     60 -
       [0, 12, 0, 8, 10, -6, 0, -5, 0, -3][r] -
@@ -166,7 +187,12 @@ export function fortune(p: Profile, date: string, key: string) {
     95,
   );
   let state = 2166136261;
-  for (const c of key + p.date + date)
+  for (const c of JSON.stringify([
+    key,
+    birth.toISOString().slice(0, 10),
+    p.hour,
+    date,
+  ]))
     state = Math.imul(state ^ c.charCodeAt(0), 16777619);
   const rand = () =>
     ((state = Math.imul(state, 1664525) + 1013904223) >>> 0) / 4294967296;
@@ -176,7 +202,8 @@ export function fortune(p: Profile, date: string, key: string) {
     [nums[i], nums[j]] = [nums[j], nums[i]];
   }
   const band = [30, 45, 60, 75, 90, 101].findIndex((v) => score < v);
-  const weekday = new Date(date + "T12:00:00Z").getUTCDay();
+  const calendarDay = new Date(date + "T12:00:00Z");
+  const weekday = calendarDay.getUTCDay();
   const contexts = [
     "일요일 장보기 전",
     "월요일 출근 전",
@@ -194,7 +221,10 @@ export function fortune(p: Profile, date: string, key: string) {
     ["미뤄둔 정산 1건을 확인해.", "잠든 포인트 1곳을 찾아봐."],
     ["이번 주 저축 목표 1개를 적어.", "받을 돈 1건을 정리해."],
   ];
-  const comment = contexts[weekday] + ", " + actions[band][(r + z) % 2];
+  const week = Math.floor(calendarDay.getTime() / (7 * 86400000));
+  const prefix =
+    week % 2 === 0 ? contexts[weekday] : contexts[weekday].slice(0, 3) + "에는";
+  const comment = prefix + ", " + actions[band][(r + z) % 2];
   const element = Math.floor(b / 2);
   const luckColor = ["청록", "주황", "베이지", "은색", "남색"][element];
   const luckItem = ["나무 소품", "가죽 카드지갑", "손수건", "동전", "물병"][
@@ -202,6 +232,7 @@ export function fortune(p: Profile, date: string, key: string) {
   ];
   return {
     score,
+    percentile,
     defense,
     grade: [
       "완전 잠금",

@@ -18,15 +18,18 @@ export function loadFullScreenAd(p: Params<"loaded">) {
 export function showFullScreenAd(
   p: Params<"userEarnedReward" | "dismissed" | "failedToShow">,
 ) {
+  let finished = false;
+  function finish(type: "userEarnedReward" | "failedToShow" | "dismissed") {
+    if (finished) return;
+    finished = true;
+    p.onEvent({ type });
+  }
   const timer = setTimeout(
-    () =>
-      p.onEvent({
-        type: mode() === "fail" ? "failedToShow" : "userEarnedReward",
-      }),
+    () => finish(mode() === "fail" ? "failedToShow" : "userEarnedReward"),
     3000,
   );
   return () => {
     clearTimeout(timer);
-    p.onEvent({ type: "dismissed" });
+    finish("dismissed");
   };
 }
